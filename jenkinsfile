@@ -1,0 +1,135 @@
+pipeline {
+    agent any
+
+    environment {
+        DOCKER_IMAGE = "majithas/banking-app"
+        DOCKER_TAG   = "${BUILD_NUMBER}"
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Install Dependencies') {
+            steps {
+                dir('APP') {
+                    sh '''
+                        python3 -m venv venv
+                        venv/bin/pip install --upgrade pip
+                        venv/bin/pip install -r requirements.txt
+                    '''
+                }
+            }
+        }
+
+        stage('Unit Test') {
+            steps {
+                dir('APP') {
+                    sh '''
+                        venv/bin/pip install pytest==7.4.2
+                        venv/bin/pytest -v
+                    '''
+                }
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                dir('APP') {
+                    script {
+                        def scannerHome = tool 'SonarScanner'
+
+                        withSonarQubeEnv('SonarQube') {
+                            sh """
+                                ${scannerHome}/bin/sonar-scanner \
+                                  -Dsonar.projectKey=banking-app \
+                                  -Dsonar.projectName=banking-app \
+                                  -Dsonar.sources=.
+                            """
+                        }
+                    }
+                }
+            }
+        }
+
+    
+
+        stage('Build Docker Image') {
+            steps {
+                dir('APP') {
+                    sh '''
+                        docker build \
+                            -t ${DOCKER_IMAGE}:${DOCKER_TAG} \
+                            -t ${DOCKER_IMAGE}:latest \
+                            .
+                    '''
+                }
+            }
+        }
+
+        stage('Trivy Security Scan') {
+            steps {
+                sh '''
+                    trivy image \
+                        --severity CRITICAL \
+                        --exit-code 1 \
+                        --ignore-unfixed \
+                        ${DOCKER_IMAGE}:${DOCKER_TAG}
+                '''
+            }
+        }
+
+        stage('Login to Docker Hub') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'dockerhub-credentials',
+                        usernameVariable: 'DOCKER_USERNAME',
+                        passwordVariable: 'DOCKER_PASSWORD'
+                    )
+                ]) {
+                    sh '''
+                        echo "$DOCKER_PASSWORD" | docker login \
+                            --username "$DOCKER_USERNAME" \
+                            --password-stdin
+                    '''
+                }
+            }
+        }
+
+        stage('Push Docker Image') {
+            steps {
+                sh '''
+                    docker push ${DOCKER_IMAGE}:${DOCKER_TAG}
+                    docker push ${DOCKER_IMAGE}:latest
+                '''
+            }
+        }
+
+        stage('Logout Docker Hub') {
+            steps {
+                sh 'docker logout'
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "======================================"
+            echo "PIPELINE COMPLETED SUCCESSFULLY"
+            echo "Docker Image: ${DOCKER_IMAGE}:${DOCKER_TAG}"
+            echo "======================================"
+        }
+
+        failure {
+            echo "======================================"
+            echo "PIPELINE FAILED"
+            echo "Check the failed stage above."
+            echo "======================================"
+        }
+    }
+}
